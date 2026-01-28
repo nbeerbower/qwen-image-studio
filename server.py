@@ -14,7 +14,9 @@ from PIL import Image
 from queue import Queue
 import threading
 import io
+import json
 import argparse
+import glob as globmodule
 from diffusers import DiffusionPipeline
 
 app = FastAPI(title="Qwen Image Studio", version="1.0.0")
@@ -25,10 +27,8 @@ parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to
 parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
 parser.add_argument("--edit-model", type=str, default="2509", choices=["original", "2509"], 
                     help="Which edit model to use: 'original' or '2509' (default: 2509)")
-parser.add_argument("--quantize", action="store_true", 
+parser.add_argument("--quantize", action="store_true",
                     help="Enable 4-bit quantization for edit model (only for original model)")
-parser.add_argument("--enable-lora", action="store_true", 
-                    help="Enable Lightning LoRA for faster inference (only for original model)")
 parser.add_argument("--cpu-offload", action="store_true", default=True,
                     help="Enable CPU offloading (default: True)")
 parser.add_argument("--max-pixels", type=int, default=1048576,
@@ -52,6 +52,11 @@ args = parser.parse_args()
 os.makedirs("generated_images", exist_ok=True)
 os.makedirs("uploaded_images", exist_ok=True)
 os.makedirs("static", exist_ok=True)
+os.makedirs("loras", exist_ok=True)
+
+# LoRA paths
+LORAS_DIR = "loras"
+PRESETS_FILE = os.path.join(LORAS_DIR, "presets.json")
 
 # Enums
 class JobType(str, Enum):
@@ -71,7 +76,7 @@ class GenerationRequest(BaseModel):
 class EditRequest(BaseModel):
     prompt: str
     negative_prompt: Optional[str] = " "
-    num_inference_steps: Optional[int] = 8 if args.enable_lora else 50
+    num_inference_steps: Optional[int] = 50
     cfg_scale: Optional[float] = 4.0
     seed: Optional[int] = None
 
@@ -96,17 +101,32 @@ class JobStatus(BaseModel):
     num_inference_steps: Optional[int] = None
     cfg_scale: Optional[float] = None
 
+class LoRASource(str, Enum):
+    huggingface = "huggingface"
+    local = "local"
+
 class LoRARequest(BaseModel):
     name: str  # Display name for the LoRA
-    repo_id: str  # HuggingFace repo ID (e.g., "lightx2v/Qwen-Image-Lightning")
-    weight_name: Optional[str] = None  # Specific weight file (e.g., "Qwen-Image-Lightning-8steps-V1.1.safetensors")
+    source: LoRASource = LoRASource.huggingface  # Source: huggingface or local
+    repo_id: Optional[str] = None  # HuggingFace repo ID (required for HuggingFace source)
+    weight_name: Optional[str] = None  # Filename for local, optional for HF
     scale: Optional[float] = 1.0  # LoRA scale/strength
-    pipeline: Literal["generation", "edit", "both"] = "generation"  # Which pipeline to apply to
+    pipeline: Literal["generation", "edit", "both"] = "edit"  # Which pipeline to apply to
+
+class LoRAPreset(BaseModel):
+    name: str
+    source: LoRASource
+    repo_id: Optional[str] = None
+    weight_name: Optional[str] = None
+    pipeline: str
+    description: str
+    recommended_steps: Optional[int] = None
 
 class LoRAInfo(BaseModel):
     name: str
-    repo_id: str
-    weight_name: Optional[str]
+    source: LoRASource
+    repo_id: Optional[str] = None
+    weight_name: Optional[str] = None
     scale: float
     pipeline: str
     loaded_at: str
@@ -324,18 +344,6 @@ def load_edit_pipeline_original():
             model_id,
             torch_dtype=torch_dtype
         )
-    
-    # Load Lightning LoRA if requested
-    if args.enable_lora:
-        print("4/4 - Loading Lightning LoRA weights...")
-        try:
-            edit_pipeline.load_lora_weights(
-                "lightx2v/Qwen-Image-Lightning",
-                weight_name="Qwen-Image-Lightning-8steps-V1.1.safetensors"
-            )
-            print("✅ Lightning LoRA loaded successfully (8-step inference enabled)")
-        except Exception as e:
-            print(f"⚠️ Could not load Lightning LoRA: {e}")
     
     # Apply CPU offloading or move to device
     if args.cpu_offload and device == "cuda":
@@ -601,7 +609,7 @@ async def edit_image(
     image: UploadFile = File(...),
     prompt: str = Form(...),
     negative_prompt: str = Form(" "),
-    num_inference_steps: int = Form(8 if args.enable_lora else 50),
+    num_inference_steps: int = Form(50),
     cfg_scale: float = Form(4.0),
     seed: Optional[int] = Form(None)
 ):
@@ -701,7 +709,6 @@ async def get_system_info():
         "edit_pipeline": f"loaded ({args.edit_model})" if edit_pipeline else "disabled",
         "edit_model": args.edit_model,
         "quantization": args.quantize,
-        "lightning_lora": args.enable_lora,
         "cpu_offload": args.cpu_offload,
         "pipeline_swap": args.pipeline_swap,
         "keep_in_vram": args.keep_in_vram,
@@ -709,7 +716,7 @@ async def get_system_info():
         "max_edit_pixels": args.max_pixels,
         "server_args": vars(args)
     }
-    
+
     if torch.cuda.is_available():
         info.update({
             "gpu_name": torch.cuda.get_device_name(0),
@@ -717,80 +724,69 @@ async def get_system_info():
             "gpu_memory_reserved": f"{torch.cuda.memory_reserved(0) / 1024**3:.2f} GB",
             "gpu_memory_total": f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
         })
-    
-    return info()
-    
-    info = {
-        "device": device,
-        "dtype": str(dtype),
-        "cuda_available": torch.cuda.is_available(),
-        "generation_pipeline": "loaded" if generation_pipeline else "disabled",
-        "edit_pipeline": f"loaded ({args.edit_model})" if edit_pipeline else "disabled",
-        "edit_model": args.edit_model,
-        "quantization": args.quantize,
-        "lightning_lora": args.enable_lora,
-        "cpu_offload": args.cpu_offload,
-        "max_edit_pixels": args.max_pixels,
-        "server_args": vars(args)
-    }
-    
-    if torch.cuda.is_available():
-        info.update({
-            "gpu_name": torch.cuda.get_device_name(0),
-            "gpu_memory_allocated": f"{torch.cuda.memory_allocated(0) / 1024**3:.2f} GB",
-            "gpu_memory_reserved": f"{torch.cuda.memory_reserved(0) / 1024**3:.2f} GB",
-            "gpu_memory_total": f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
-        })
-    
+
     return info
 
 @app.post("/lora/load")
 async def load_lora(request: LoRARequest):
-    """Load a LoRA adapter"""
+    """Load a LoRA adapter from HuggingFace or local file"""
     try:
         # Validate pipeline availability
         if request.pipeline in ["generation", "both"] and generation_pipeline is None:
             raise HTTPException(status_code=400, detail="Generation pipeline is not loaded")
         if request.pipeline in ["edit", "both"] and edit_pipeline is None:
             raise HTTPException(status_code=400, detail="Edit pipeline is not loaded")
-        
+
+        # Validate request based on source
+        if request.source == LoRASource.huggingface:
+            if not request.repo_id:
+                raise HTTPException(status_code=400, detail="repo_id is required for HuggingFace source")
+        elif request.source == LoRASource.local:
+            if not request.weight_name:
+                raise HTTPException(status_code=400, detail="weight_name is required for local source")
+            local_path = os.path.join(LORAS_DIR, request.weight_name)
+            if not os.path.exists(local_path):
+                raise HTTPException(status_code=404, detail=f"Local LoRA file not found: {request.weight_name}")
+
         # Load LoRA on the appropriate pipeline(s)
         loaded_on = []
-        
+
+        def load_on_pipeline(pipeline, pipeline_name):
+            if request.source == LoRASource.local:
+                # Load from local file
+                local_path = os.path.join(LORAS_DIR, request.weight_name)
+                pipeline.load_lora_weights(
+                    LORAS_DIR,
+                    weight_name=request.weight_name,
+                    adapter_name=request.name
+                )
+            else:
+                # Load from HuggingFace
+                if request.weight_name:
+                    pipeline.load_lora_weights(
+                        request.repo_id,
+                        weight_name=request.weight_name,
+                        adapter_name=request.name
+                    )
+                else:
+                    pipeline.load_lora_weights(
+                        request.repo_id,
+                        adapter_name=request.name
+                    )
+            pipeline.set_adapters([request.name], adapter_weights=[request.scale])
+            loaded_on.append(pipeline_name)
+
         if request.pipeline in ["generation", "both"] and generation_pipeline:
-            if request.weight_name:
-                generation_pipeline.load_lora_weights(
-                    request.repo_id, 
-                    weight_name=request.weight_name,
-                    adapter_name=request.name
-                )
-            else:
-                generation_pipeline.load_lora_weights(
-                    request.repo_id,
-                    adapter_name=request.name
-                )
-            generation_pipeline.set_adapters([request.name], adapter_weights=[request.scale])
-            loaded_on.append("generation")
-        
+            load_on_pipeline(generation_pipeline, "generation")
+
         if request.pipeline in ["edit", "both"] and edit_pipeline:
-            if request.weight_name:
-                edit_pipeline.load_lora_weights(
-                    request.repo_id, 
-                    weight_name=request.weight_name,
-                    adapter_name=request.name
-                )
-            else:
-                edit_pipeline.load_lora_weights(
-                    request.repo_id,
-                    adapter_name=request.name
-                )
-            edit_pipeline.set_adapters([request.name], adapter_weights=[request.scale])
-            loaded_on.append("edit")
-        
+            load_on_pipeline(edit_pipeline, "edit")
+
         # Track loaded LoRA
         loaded_loras[request.name] = {
             "info": LoRAInfo(
                 name=request.name,
+                source=request.source,
                 repo_id=request.repo_id,
                 weight_name=request.weight_name,
                 scale=request.scale,
@@ -800,16 +796,19 @@ async def load_lora(request: LoRARequest):
             ),
             "loaded_on": loaded_on
         }
-        
+
         # Clear CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
+
         return {
             "message": f"LoRA '{request.name}' loaded successfully",
+            "source": request.source.value,
             "loaded_on": loaded_on
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load LoRA: {str(e)}")
 
@@ -852,29 +851,33 @@ async def activate_lora(name: str, scale: Optional[float] = None):
     """Activate a loaded LoRA with optional scale adjustment"""
     if name not in loaded_loras:
         raise HTTPException(status_code=404, detail=f"LoRA '{name}' not found")
-    
+
     try:
         lora_info = loaded_loras[name]
         if scale is not None:
             lora_info["info"].scale = scale
-        
+
         activated_on = []
-        
-        if "generation" in lora_info["loaded_on"] and generation_pipeline:
-            generation_pipeline.set_adapters([name], adapter_weights=[lora_info["info"].scale])
-            activated_on.append("generation")
-        
-        if "edit" in lora_info["loaded_on"] and edit_pipeline:
-            edit_pipeline.set_adapters([name], adapter_weights=[lora_info["info"].scale])
-            activated_on.append("edit")
-        
+
+        # Use enable_lora() to reactivate, then set_adapters() within no_grad for scale
+        with torch.no_grad():
+            if "generation" in lora_info["loaded_on"] and generation_pipeline:
+                generation_pipeline.enable_lora()
+                generation_pipeline.set_adapters([name], adapter_weights=[lora_info["info"].scale])
+                activated_on.append("generation")
+
+            if "edit" in lora_info["loaded_on"] and edit_pipeline:
+                edit_pipeline.enable_lora()
+                edit_pipeline.set_adapters([name], adapter_weights=[lora_info["info"].scale])
+                activated_on.append("edit")
+
         lora_info["info"].active = True
-        
+
         return {
             "message": f"LoRA '{name}' activated with scale {lora_info['info'].scale}",
             "activated_on": activated_on
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to activate LoRA: {str(e)}")
 
@@ -913,6 +916,75 @@ async def list_loras():
         "loras": [lora["info"] for lora in loaded_loras.values()],
         "count": len(loaded_loras)
     }
+
+@app.get("/lora/available")
+async def get_available_loras():
+    """List available local LoRA files from the loras/ directory"""
+    try:
+        available = []
+        # Find all .safetensors files in the loras directory
+        pattern = os.path.join(LORAS_DIR, "*.safetensors")
+        files = globmodule.glob(pattern)
+
+        for filepath in files:
+            filename = os.path.basename(filepath)
+            filesize = os.path.getsize(filepath)
+            modified = datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
+
+            available.append({
+                "filename": filename,
+                "size_mb": round(filesize / (1024 * 1024), 2),
+                "modified": modified
+            })
+
+        # Sort by modification time (newest first)
+        available.sort(key=lambda x: x["modified"], reverse=True)
+
+        return {
+            "available": available,
+            "count": len(available),
+            "directory": LORAS_DIR
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to scan loras directory: {str(e)}")
+
+@app.get("/lora/presets")
+async def get_lora_presets():
+    """Get configured LoRA presets from presets.json"""
+    try:
+        if not os.path.exists(PRESETS_FILE):
+            return {"presets": [], "count": 0}
+
+        with open(PRESETS_FILE, "r") as f:
+            data = json.load(f)
+
+        presets = data.get("presets", [])
+
+        # Validate and convert to LoRAPreset models
+        validated_presets = []
+        for preset in presets:
+            try:
+                validated = LoRAPreset(
+                    name=preset["name"],
+                    source=LoRASource(preset.get("source", "huggingface")),
+                    repo_id=preset.get("repo_id"),
+                    weight_name=preset.get("weight_name"),
+                    pipeline=preset.get("pipeline", "edit"),
+                    description=preset.get("description", ""),
+                    recommended_steps=preset.get("recommended_steps")
+                )
+                validated_presets.append(validated)
+            except Exception as e:
+                print(f"Warning: Invalid preset skipped: {e}")
+
+        return {
+            "presets": validated_presets,
+            "count": len(validated_presets)
+        }
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Invalid presets.json format: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load presets: {str(e)}")
 
 # Serve generated images
 app.mount("/images", StaticFiles(directory="generated_images"), name="images")

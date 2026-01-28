@@ -639,10 +639,10 @@
                     <div class="form-group">
                         <label for="editSteps">Inference Steps</label>
                         <select id="editSteps">
-                            <option value="4">4 (Lightning Fast)</option>
-                            <option value="8" selected>8 (Lightning Default)</option>
-                            <option value="12">12 (Better)</option>
-                            <option value="16">16 (Best)</option>
+                            <option value="8">8 (Fast - with Lightning LoRA)</option>
+                            <option value="20">20 (Quick)</option>
+                            <option value="30">30 (Better)</option>
+                            <option value="50" selected>50 (Default)</option>
                         </select>
                     </div>
                     
@@ -675,31 +675,35 @@
                 <div id="loraPanel" class="lora-panel hidden">
                     <h4>Load New LoRA</h4>
                     <div class="lora-form">
-                        <input type="text" id="loraName" placeholder="LoRA Name (e.g., MagicBeauty)" />
-                        <input type="text" id="loraRepo" placeholder="HuggingFace Repo (e.g., merjic/majicbeauty-qwen1)" />
-                        <input type="text" id="loraWeight" placeholder="Weight File (optional)" />
+                        <input type="text" id="loraName" placeholder="LoRA Name (e.g., Lightning)" />
+                        <select id="loraSource" onchange="toggleLoraSourceFields()">
+                            <option value="huggingface">HuggingFace</option>
+                            <option value="local">Local File</option>
+                        </select>
+                        <input type="text" id="loraRepo" placeholder="HuggingFace Repo (e.g., lightx2v/Qwen-Image-Lightning)" />
+                        <input type="text" id="loraWeight" placeholder="Weight File (optional for HF, required for local)" />
                         <input type="number" id="loraScale" placeholder="Scale (1.0)" min="0" max="2" step="0.1" value="1.0" />
                         <select id="loraPipeline">
-                            <option value="generation">Generation Only</option>
                             <option value="edit">Edit Only</option>
+                            <option value="generation">Generation Only</option>
                             <option value="both">Both Pipelines</option>
                         </select>
                         <button onclick="loadLora()">Load LoRA</button>
                     </div>
-                    
+
+                    <h4>Available Local LoRAs</h4>
+                    <div id="localLoraList" class="lora-list">
+                        <div style="color: #666; padding: 10px;">Loading...</div>
+                    </div>
+
                     <h4>Loaded LoRAs</h4>
                     <div id="loraList" class="lora-list">
                         <!-- LoRAs will be listed here -->
                     </div>
-                    
+
                     <h4>Preset LoRAs</h4>
-                    <div class="preset-loras">
-                        <button onclick="loadPresetLora('Lightning', 'lightx2v/Qwen-Image-Lightning', 'Qwen-Image-Lightning-8steps-V1.1.safetensors', 'edit')">
-                            ⚡ Lightning (8-step Edit)
-                        </button>
-                        <button onclick="loadPresetLora('MagicBeauty', 'merjic/majicbeauty-qwen1', null, 'generation')">
-                            ✨ MagicBeauty (Realistic)
-                        </button>
+                    <div id="presetLoraList" class="preset-loras">
+                        <div style="color: #666; padding: 10px;">Loading...</div>
                     </div>
                 </div>
             </div>
@@ -756,23 +760,55 @@
         }
 
         // LoRA Management
+        let availableLocalLoras = [];
+        let loraPresets = [];
+
         function toggleLoraPanel() {
             const panel = document.getElementById('loraPanel');
             panel.classList.toggle('hidden');
             if (!panel.classList.contains('hidden')) {
                 refreshLoras();
+                refreshAvailableLoras();
+                refreshPresets();
+            }
+        }
+
+        function toggleLoraSourceFields() {
+            const source = document.getElementById('loraSource').value;
+            const repoField = document.getElementById('loraRepo');
+            const weightField = document.getElementById('loraWeight');
+
+            if (source === 'local') {
+                repoField.style.display = 'none';
+                repoField.required = false;
+                weightField.placeholder = 'Weight File (required)';
+            } else {
+                repoField.style.display = 'block';
+                repoField.required = true;
+                weightField.placeholder = 'Weight File (optional for HF)';
             }
         }
 
         async function loadLora() {
             const name = document.getElementById('loraName').value.trim();
+            const source = document.getElementById('loraSource').value;
             const repo = document.getElementById('loraRepo').value.trim();
             const weight = document.getElementById('loraWeight').value.trim() || null;
             const scale = parseFloat(document.getElementById('loraScale').value) || 1.0;
             const pipeline = document.getElementById('loraPipeline').value;
 
-            if (!name || !repo) {
-                alert('Please provide both a name and repository ID');
+            if (!name) {
+                alert('Please provide a name for the LoRA');
+                return;
+            }
+
+            if (source === 'huggingface' && !repo) {
+                alert('Please provide a HuggingFace repository ID');
+                return;
+            }
+
+            if (source === 'local' && !weight) {
+                alert('Please provide a weight file name for local LoRA');
                 return;
             }
 
@@ -784,7 +820,8 @@
                     },
                     body: JSON.stringify({
                         name: name,
-                        repo_id: repo,
+                        source: source,
+                        repo_id: source === 'huggingface' ? repo : null,
                         weight_name: weight,
                         scale: scale,
                         pipeline: pipeline
@@ -792,7 +829,7 @@
                 });
 
                 const result = await response.json();
-                
+
                 if (response.ok) {
                     alert(result.message);
                     // Clear form
@@ -809,12 +846,95 @@
             }
         }
 
-        async function loadPresetLora(name, repo, weight, pipeline) {
-            document.getElementById('loraName').value = name;
-            document.getElementById('loraRepo').value = repo;
-            document.getElementById('loraWeight').value = weight || '';
+        async function loadPresetLora(preset) {
+            document.getElementById('loraName').value = preset.name;
+            document.getElementById('loraSource').value = preset.source;
+            toggleLoraSourceFields();
+            document.getElementById('loraRepo').value = preset.repo_id || '';
+            document.getElementById('loraWeight').value = preset.weight_name || '';
             document.getElementById('loraScale').value = '1.0';
-            document.getElementById('loraPipeline').value = pipeline;
+            document.getElementById('loraPipeline').value = preset.pipeline || 'edit';
+
+            // Show recommended steps hint
+            if (preset.recommended_steps) {
+                alert(`Tip: ${preset.name} works best with ${preset.recommended_steps} inference steps`);
+            }
+
+            // Actually load it
+            await loadLora();
+        }
+
+        async function loadLocalLora(filename) {
+            // Extract name from filename (remove extension)
+            const name = filename.replace('.safetensors', '').replace(/_/g, ' ');
+            document.getElementById('loraName').value = name;
+            document.getElementById('loraSource').value = 'local';
+            toggleLoraSourceFields();
+            document.getElementById('loraWeight').value = filename;
+            document.getElementById('loraScale').value = '1.0';
+
+            // Actually load it
+            await loadLora();
+        }
+
+        async function refreshAvailableLoras() {
+            try {
+                const response = await fetch('/lora/available');
+                const data = await response.json();
+
+                availableLocalLoras = data.available || [];
+                displayAvailableLoras();
+            } catch (error) {
+                console.error('Error fetching available LoRAs:', error);
+            }
+        }
+
+        function displayAvailableLoras() {
+            const list = document.getElementById('localLoraList');
+
+            if (availableLocalLoras.length === 0) {
+                list.innerHTML = '<div style="color: #666; padding: 10px;">No local LoRA files found in loras/ folder</div>';
+                return;
+            }
+
+            list.innerHTML = availableLocalLoras.map(lora => `
+                <div class="lora-item">
+                    <div class="lora-info">
+                        <h5>${lora.filename}</h5>
+                        <small>${lora.size_mb} MB | Modified: ${new Date(lora.modified).toLocaleString()}</small>
+                    </div>
+                    <div class="lora-actions">
+                        <button class="lora-activate" onclick="loadLocalLora('${lora.filename}')">Load</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function refreshPresets() {
+            try {
+                const response = await fetch('/lora/presets');
+                const data = await response.json();
+
+                loraPresets = data.presets || [];
+                displayPresets();
+            } catch (error) {
+                console.error('Error fetching presets:', error);
+            }
+        }
+
+        function displayPresets() {
+            const list = document.getElementById('presetLoraList');
+
+            if (loraPresets.length === 0) {
+                list.innerHTML = '<div style="color: #666; padding: 10px;">No presets configured</div>';
+                return;
+            }
+
+            list.innerHTML = loraPresets.map((preset, index) => `
+                <button onclick="loadPresetLora(loraPresets[${index}])" title="${preset.description}">
+                    ${preset.name}${preset.recommended_steps ? ` (${preset.recommended_steps}-step)` : ''}
+                </button>
+            `).join('');
         }
 
         async function activateLora(name) {
@@ -895,29 +1015,33 @@
 
         function displayLoras() {
             const loraList = document.getElementById('loraList');
-            
+
             if (loadedLoras.length === 0) {
                 loraList.innerHTML = '<div style="color: #666; padding: 10px;">No LoRAs loaded</div>';
                 return;
             }
 
-            loraList.innerHTML = loadedLoras.map(lora => `
-                <div class="lora-item">
-                    <div class="lora-info">
-                        <h5>${lora.name} ${lora.active ? '✅' : '❌'}</h5>
-                        <small>${lora.repo_id} | ${lora.pipeline} | Loaded: ${new Date(lora.loaded_at).toLocaleTimeString()}</small>
+            loraList.innerHTML = loadedLoras.map(lora => {
+                const sourceLabel = lora.source === 'local' ? '📁 Local' : '🤗 HuggingFace';
+                const sourceInfo = lora.source === 'local' ? lora.weight_name : lora.repo_id;
+                return `
+                    <div class="lora-item">
+                        <div class="lora-info">
+                            <h5>${lora.name} ${lora.active ? '✅' : '❌'}</h5>
+                            <small>${sourceLabel}: ${sourceInfo || 'N/A'} | ${lora.pipeline} | Loaded: ${new Date(lora.loaded_at).toLocaleTimeString()}</small>
+                        </div>
+                        <div class="lora-actions">
+                            <input type="number" id="scale-${lora.name}" class="lora-scale"
+                                   value="${lora.scale}" min="0" max="2" step="0.1" />
+                            ${lora.active ?
+                                `<button class="lora-deactivate" onclick="deactivateLora('${lora.name}')">Deactivate</button>` :
+                                `<button class="lora-activate" onclick="activateLora('${lora.name}')">Activate</button>`
+                            }
+                            <button class="lora-unload" onclick="unloadLora('${lora.name}')">Unload</button>
+                        </div>
                     </div>
-                    <div class="lora-actions">
-                        <input type="number" id="scale-${lora.name}" class="lora-scale" 
-                               value="${lora.scale}" min="0" max="2" step="0.1" />
-                        ${lora.active ? 
-                            `<button class="lora-deactivate" onclick="deactivateLora('${lora.name}')">Deactivate</button>` :
-                            `<button class="lora-activate" onclick="activateLora('${lora.name}')">Activate</button>`
-                        }
-                        <button class="lora-unload" onclick="unloadLora('${lora.name}')">Unload</button>
-                    </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
         }
 
         // File upload handling for edit mode

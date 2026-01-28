@@ -1,0 +1,21 @@
+{
+  "presets": [
+    {
+      "name": "Lightning",
+      "source": "huggingface",
+      "repo_id": "lightx2v/Qwen-Image-Lightning",
+      "weight_name": "Qwen-Image-Lightning-8steps-V1.1.safetensors",
+      "pipeline": "edit",
+      "description": "8-step fast inference for original edit model",
+      "recommended_steps": 8
+    },
+    {
+      "name": "InScene",
+      "source": "huggingface",
+      "repo_id": "flymy-ai/qwen-image-edit-2509-inscene-lora",
+      "weight_name": "pytorch_lora_weights.safetensors",
+      "pipeline": "edit",
+      "description": "Scene-coherent editing with better object positioning"
+    }
+  ]
+}
