@@ -63,10 +63,16 @@ Model Selection:
   --edit-model {original,2509,2511}   Edit model (default: 2511)
 
 Memory Management:
-  --quantize              Enable 4-bit quantization (original edit model only)
+  --quantize              Enable 4-bit quantization for reduced VRAM
   --cpu-offload           Enable CPU offloading (default: True)
   --pipeline-swap         Swap pipelines between CPU/GPU on demand
   --keep-in-vram {generation,edit}  Pin specific pipeline in VRAM
+
+Multi-GPU:
+  --device DEVICE         Default device: auto, cpu, cuda, cuda:0, cuda:1, etc.
+  --generation-device DEVICE  Device for generation (e.g., cuda:0)
+  --edit-device DEVICE    Device for edit (e.g., cuda:1)
+  --device-map            Distribute model across all GPUs (model parallelism)
 
 Pipeline Control:
   --disable-generation    Disable generation pipeline
@@ -75,7 +81,6 @@ Pipeline Control:
 Other:
   --host HOST             Host to bind to (default: 0.0.0.0)
   --port PORT             Port to bind to (default: 8000)
-  --device {auto,cuda,cpu}  Device selection (default: auto)
   --max-pixels N          Max pixels for editing (default: 1048576)
 ```
 
@@ -84,6 +89,18 @@ Other:
 ### Memory-Constrained Setup (12GB VRAM)
 ```bash
 python server.py --pipeline-swap --keep-in-vram edit
+```
+
+### Multi-GPU: Separate Pipelines on Different GPUs
+```bash
+# Generation on GPU 0, Edit on GPU 1
+python server.py --generation-device cuda:0 --edit-device cuda:1
+```
+
+### Multi-GPU: Model Parallelism (Split Large Model Across GPUs)
+```bash
+# Distribute each model across all available GPUs
+python server.py --device-map
 ```
 
 ### Fast Editing with Lightning LoRA

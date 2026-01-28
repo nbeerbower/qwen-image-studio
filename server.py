@@ -40,8 +40,13 @@ parser.add_argument("--disable-generation", action="store_true",
 parser.add_argument("--disable-edit", action="store_true",
                     help="Disable image editing pipeline")
 parser.add_argument("--device", type=str, default="auto",
-                    choices=["auto", "cuda", "cpu"],
-                    help="Device to use (default: auto)")
+                    help="Device to use: auto, cpu, cuda, cuda:0, cuda:1, etc. (default: auto)")
+parser.add_argument("--generation-device", type=str, default=None,
+                    help="Device for generation pipeline (overrides --device). E.g., cuda:0")
+parser.add_argument("--edit-device", type=str, default=None,
+                    help="Device for edit pipeline (overrides --device). E.g., cuda:1")
+parser.add_argument("--device-map", action="store_true",
+                    help="Use accelerate device_map='auto' to distribute model across GPUs")
 parser.add_argument("--pipeline-swap", action="store_true",
                     help="Keep pipelines in CPU memory and swap to GPU only when needed (saves VRAM)")
 parser.add_argument("--keep-in-vram", type=str, default=None,
@@ -146,18 +151,47 @@ pipeline_lock = threading.Lock()  # For thread-safe pipeline swapping
 current_pipeline_in_vram = None  # Track which pipeline is currently in VRAM
 
 # Determine device
-def get_device():
-    if args.device == "cpu":
+def parse_device(device_str):
+    """Parse device string and return (device, dtype)"""
+    if device_str == "cpu":
         return "cpu", torch.float32
-    elif args.device == "cuda":
+    elif device_str.startswith("cuda"):
         if not torch.cuda.is_available():
-            print("⚠️ CUDA requested but not available, falling back to CPU")
+            print(f"⚠️ {device_str} requested but CUDA not available, falling back to CPU")
             return "cpu", torch.float32
-        return "cuda", torch.bfloat16
+        # Handle cuda:N format
+        if ":" in device_str:
+            gpu_id = int(device_str.split(":")[1])
+            if gpu_id >= torch.cuda.device_count():
+                print(f"⚠️ {device_str} requested but only {torch.cuda.device_count()} GPUs available, using cuda:0")
+                return "cuda:0", torch.bfloat16
+        return device_str, torch.bfloat16
     else:  # auto
         if torch.cuda.is_available():
             return "cuda", torch.bfloat16
         return "cpu", torch.float32
+
+def get_device():
+    """Get default device"""
+    return parse_device(args.device)
+
+def get_generation_device():
+    """Get device for generation pipeline"""
+    if args.generation_device:
+        return parse_device(args.generation_device)
+    return get_device()
+
+def get_edit_device():
+    """Get device for edit pipeline"""
+    if args.edit_device:
+        return parse_device(args.edit_device)
+    return get_device()
+
+def get_gpu_count():
+    """Get number of available GPUs"""
+    if torch.cuda.is_available():
+        return torch.cuda.device_count()
+    return 0
 
 def swap_pipeline_to_device(pipeline_name: str):
     """Swap pipeline to GPU/CPU based on configuration"""
@@ -256,12 +290,27 @@ def load_generation_pipeline():
 
     print(f"🔄 Loading {model_label} generation pipeline...")
 
-    device, torch_dtype = get_device()
+    device, torch_dtype = get_generation_device()
+    if args.generation_device:
+        print(f"   Using device: {device}")
 
     # If pipeline swapping is enabled, always load to CPU first
     load_device = "cpu" if args.pipeline_swap else device
 
-    if args.quantize and device == "cuda":
+    # Device map for multi-GPU model parallelism
+    if args.device_map and get_gpu_count() > 1:
+        print(f"📊 Using device_map='auto' to distribute across {get_gpu_count()} GPUs")
+        generation_pipeline = DiffusionPipeline.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            use_safetensors=True
+        )
+        print(f"✅ {model_label} generation pipeline loaded with multi-GPU distribution!")
+        return
+
+    if args.quantize and device != "cpu":
         # Quantized models cannot be moved between devices
         if args.pipeline_swap:
             print("⚠️ Warning: --quantize is incompatible with --pipeline-swap. Disabling pipeline swap.")
@@ -323,8 +372,10 @@ def load_generation_pipeline():
         use_safetensors=True
     )
 
+    is_cuda = device.startswith("cuda")
+
     # CPU offloading works differently with pipeline swap
-    if args.cpu_offload and device == "cuda":
+    if args.cpu_offload and is_cuda:
         if args.pipeline_swap:
             # We'll enable CPU offload after swapping to GPU
             generation_pipeline = generation_pipeline.to(load_device)
@@ -335,8 +386,8 @@ def load_generation_pipeline():
         generation_pipeline = generation_pipeline.to(load_device)
 
     # If this pipeline should be kept in VRAM, move it now
-    if args.pipeline_swap and args.keep_in_vram == "generation" and device == "cuda":
-        generation_pipeline.to("cuda")
+    if args.pipeline_swap and args.keep_in_vram == "generation" and is_cuda:
+        generation_pipeline.to(device)
         if args.cpu_offload:
             generation_pipeline.enable_model_cpu_offload()
         current_pipeline_in_vram = "generation"
@@ -353,16 +404,32 @@ def load_edit_pipeline_original():
     """Load the original Qwen-Image-Edit pipeline with optional quantization"""
     global edit_pipeline, current_pipeline_in_vram
     from diffusers import QwenImageEditPipeline, QwenImageTransformer2DModel
-    
+
     print("🔄 Loading original Qwen-Image-Edit pipeline...")
-    
+
     model_id = "Qwen/Qwen-Image-Edit"
-    device, torch_dtype = get_device()
-    
+    device, torch_dtype = get_edit_device()
+    if args.edit_device:
+        print(f"   Using device: {device}")
+
+    is_cuda = device.startswith("cuda")
+
     # If pipeline swapping is enabled, always load to CPU first
     load_device = "cpu" if args.pipeline_swap else device
-    
-    if args.quantize and device == "cuda":
+
+    # Device map for multi-GPU model parallelism
+    if args.device_map and get_gpu_count() > 1:
+        print(f"📊 Using device_map='auto' to distribute across {get_gpu_count()} GPUs")
+        edit_pipeline = QwenImageEditPipeline.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+        )
+        edit_pipeline.set_progress_bar_config(disable=None)
+        print("✅ Original edit pipeline loaded with multi-GPU distribution!")
+        return
+
+    if args.quantize and is_cuda:
         # Quantized models cannot be moved between devices, so check for conflicts
         if args.pipeline_swap:
             print("⚠️ Warning: --quantize is incompatible with --pipeline-swap. Disabling pipeline swap.")
@@ -421,9 +488,9 @@ def load_edit_pipeline_original():
             model_id,
             torch_dtype=torch_dtype
         )
-    
+
     # Apply CPU offloading or move to device
-    if args.cpu_offload and device == "cuda":
+    if args.cpu_offload and is_cuda:
         if args.pipeline_swap:
             # We'll enable CPU offload after swapping to GPU
             edit_pipeline = edit_pipeline.to(load_device)
@@ -432,14 +499,14 @@ def load_edit_pipeline_original():
             edit_pipeline.enable_model_cpu_offload()
     else:
         edit_pipeline = edit_pipeline.to(load_device)
-    
+
     # If this pipeline should be kept in VRAM, move it now
-    if args.pipeline_swap and args.keep_in_vram == "edit" and device == "cuda":
-        edit_pipeline.to("cuda")
+    if args.pipeline_swap and args.keep_in_vram == "edit" and is_cuda:
+        edit_pipeline.to(device)
         if args.cpu_offload:
             edit_pipeline.enable_model_cpu_offload()
         current_pipeline_in_vram = "edit"
-    
+
     edit_pipeline.set_progress_bar_config(disable=None)
     print(f"✅ Original edit pipeline loaded successfully!")
     if args.pipeline_swap:
@@ -457,12 +524,32 @@ def load_edit_pipeline_plus(model_version: str):
     model_id = f"Qwen/Qwen-Image-Edit-{model_version}"
     print(f"🔄 Loading Qwen-Image-Edit-{model_version} pipeline...")
 
-    device, torch_dtype = get_device()
+    device, torch_dtype = get_edit_device()
+    if args.edit_device:
+        print(f"   Using device: {device}")
+
+    is_cuda = device.startswith("cuda")
 
     # If pipeline swapping is enabled, always load to CPU first
     load_device = "cpu" if args.pipeline_swap else device
 
-    if args.quantize and device == "cuda":
+    # Device map for multi-GPU model parallelism
+    if args.device_map and get_gpu_count() > 1:
+        print(f"📊 Using device_map='auto' to distribute across {get_gpu_count()} GPUs")
+        edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+        )
+        edit_pipeline.set_progress_bar_config(disable=None)
+        print(f"✅ Qwen-Image-Edit-{model_version} pipeline loaded with multi-GPU distribution!")
+        if model_version == "2511":
+            print("Features: Reduced image drift, improved consistency, enhanced geometric reasoning")
+        else:
+            print("Features: Enhanced consistency, multi-image support, native ControlNet")
+        return
+
+    if args.quantize and is_cuda:
         # Quantized models cannot be moved between devices, so check for conflicts
         if args.pipeline_swap:
             print("⚠️ Warning: --quantize is incompatible with --pipeline-swap. Disabling pipeline swap.")
@@ -527,7 +614,7 @@ def load_edit_pipeline_plus(model_version: str):
     )
 
     # Move to device with CPU offload support
-    if args.cpu_offload and device == "cuda":
+    if args.cpu_offload and is_cuda:
         if args.pipeline_swap:
             # We'll enable CPU offload after swapping to GPU
             edit_pipeline.to(load_device)
@@ -543,8 +630,8 @@ def load_edit_pipeline_plus(model_version: str):
         edit_pipeline.to(load_device)
 
     # If this pipeline should be kept in VRAM, move it now
-    if args.pipeline_swap and args.keep_in_vram == "edit" and device == "cuda":
-        edit_pipeline.to("cuda")
+    if args.pipeline_swap and args.keep_in_vram == "edit" and is_cuda:
+        edit_pipeline.to(device)
         if args.cpu_offload and hasattr(edit_pipeline, 'enable_model_cpu_offload'):
             edit_pipeline.enable_model_cpu_offload()
         current_pipeline_in_vram = "edit"
