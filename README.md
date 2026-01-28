@@ -196,9 +196,15 @@ qwen-image-studio/
 
 ### Out of Memory
 - Enable `--pipeline-swap` to swap models between CPU/GPU
-- Use `--quantize` with original edit model
+- Use `--quantize` with original edit model (note: incompatible with `--pipeline-swap`)
 - Reduce `--max-pixels` for smaller image processing
 - Disable unused pipeline with `--disable-generation` or `--disable-edit`
+
+### Quantization Notes
+- `--quantize` works with all models (generation and edit)
+- Quantizes both transformer and text encoder to 4-bit NF4
+- Quantized models are pinned to CUDA and cannot use `--pipeline-swap`
+- Requires `bitsandbytes` package installed
 
 ### LoRA Activation Error
 If you get "requires_grad=True on inference tensor" when reactivating a LoRA, this is handled automatically. The server uses `torch.no_grad()` context for LoRA operations.

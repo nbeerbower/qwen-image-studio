@@ -30,7 +30,7 @@ parser.add_argument("--edit-model", type=str, default="2511", choices=["original
 parser.add_argument("--generation-model", type=str, default="2512", choices=["original", "2512"],
                     help="Which generation model to use: 'original' or '2512' (default: 2512)")
 parser.add_argument("--quantize", action="store_true",
-                    help="Enable 4-bit quantization for edit model (only for original model)")
+                    help="Enable 4-bit quantization for reduced VRAM usage (incompatible with --pipeline-swap)")
 parser.add_argument("--cpu-offload", action="store_true", default=True,
                     help="Enable CPU offloading (default: True)")
 parser.add_argument("--max-pixels", type=int, default=1048576,
@@ -240,6 +240,7 @@ def resize_image_if_needed(image, max_pixels=None):
 def load_generation_pipeline():
     """Load the Qwen-Image generation pipeline"""
     global generation_pipeline, current_pipeline_in_vram
+    from diffusers import QwenImageTransformer2DModel
 
     if args.disable_generation:
         print("⚠️ Image generation pipeline disabled")
@@ -260,6 +261,61 @@ def load_generation_pipeline():
     # If pipeline swapping is enabled, always load to CPU first
     load_device = "cpu" if args.pipeline_swap else device
 
+    if args.quantize and device == "cuda":
+        # Quantized models cannot be moved between devices
+        if args.pipeline_swap:
+            print("⚠️ Warning: --quantize is incompatible with --pipeline-swap. Disabling pipeline swap.")
+            args.pipeline_swap = False
+
+        print("📦 Using 4-bit quantization...")
+        from transformers import BitsAndBytesConfig as TransformersBitsAndBytesConfig
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
+
+        # Load Visual Transformer (4-bit)
+        print("1/3 - Loading visual transformer...")
+        quantization_config_diffusers = DiffusersBitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        transformer = QwenImageTransformer2DModel.from_pretrained(
+            model_id,
+            subfolder="transformer",
+            quantization_config=quantization_config_diffusers,
+            torch_dtype=torch_dtype,
+        )
+
+        # Load Text Encoder (4-bit)
+        print("2/3 - Loading text encoder...")
+        quantization_config_transformers = TransformersBitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            subfolder="text_encoder",
+            quantization_config=quantization_config_transformers,
+            torch_dtype=torch_dtype,
+        )
+
+        # Create Pipeline
+        print("3/3 - Creating pipeline...")
+        generation_pipeline = DiffusionPipeline.from_pretrained(
+            model_id,
+            transformer=transformer,
+            text_encoder=text_encoder,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+        )
+        print(f"✅ {model_label} generation pipeline loaded with 4-bit quantization!")
+        return
+
+    # Non-quantized loading
     generation_pipeline = DiffusionPipeline.from_pretrained(
         model_id,
         torch_dtype=torch_dtype,
@@ -307,18 +363,23 @@ def load_edit_pipeline_original():
     load_device = "cpu" if args.pipeline_swap else device
     
     if args.quantize and device == "cuda":
+        # Quantized models cannot be moved between devices, so check for conflicts
+        if args.pipeline_swap:
+            print("⚠️ Warning: --quantize is incompatible with --pipeline-swap. Disabling pipeline swap.")
+            args.pipeline_swap = False
+
         print("📦 Using 4-bit quantization...")
         from transformers import BitsAndBytesConfig as TransformersBitsAndBytesConfig
         from transformers import Qwen2_5_VLForConditionalGeneration
         from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
-        
+
         # Load Visual Transformer (4-bit)
-        print("1/4 - Loading visual transformer...")
+        print("1/3 - Loading visual transformer...")
         quantization_config_diffusers = DiffusersBitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
-            llm_int8_skip_modules=["transformer_blocks.0.img_mod"],
+            bnb_4bit_use_double_quant=True,
         )
         transformer = QwenImageTransformer2DModel.from_pretrained(
             model_id,
@@ -326,13 +387,14 @@ def load_edit_pipeline_original():
             quantization_config=quantization_config_diffusers,
             torch_dtype=torch_dtype,
         )
-        
+
         # Load Text Encoder (4-bit)
-        print("2/4 - Loading text encoder...")
+        print("2/3 - Loading text encoder...")
         quantization_config_transformers = TransformersBitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
         )
         text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
@@ -340,15 +402,19 @@ def load_edit_pipeline_original():
             quantization_config=quantization_config_transformers,
             torch_dtype=torch_dtype,
         )
-        
+
         # Create Pipeline
-        print("3/4 - Creating pipeline...")
+        print("3/3 - Creating pipeline...")
         edit_pipeline = QwenImageEditPipeline.from_pretrained(
             model_id,
             transformer=transformer,
             text_encoder=text_encoder,
             torch_dtype=torch_dtype,
         )
+        # Quantized models are already on CUDA, skip device placement below
+        print("✅ Original edit pipeline loaded with 4-bit quantization!")
+        edit_pipeline.set_progress_bar_config(disable=None)
+        return
     else:
         # Load without quantization
         edit_pipeline = QwenImageEditPipeline.from_pretrained(
@@ -386,7 +452,7 @@ def load_edit_pipeline_original():
 def load_edit_pipeline_plus(model_version: str):
     """Load the Qwen-Image-Edit-2509 or 2511 pipeline (QwenImageEditPlusPipeline)"""
     global edit_pipeline, current_pipeline_in_vram
-    from diffusers import QwenImageEditPlusPipeline
+    from diffusers import QwenImageEditPlusPipeline, QwenImageTransformer2DModel
 
     model_id = f"Qwen/Qwen-Image-Edit-{model_version}"
     print(f"🔄 Loading Qwen-Image-Edit-{model_version} pipeline...")
@@ -396,6 +462,65 @@ def load_edit_pipeline_plus(model_version: str):
     # If pipeline swapping is enabled, always load to CPU first
     load_device = "cpu" if args.pipeline_swap else device
 
+    if args.quantize and device == "cuda":
+        # Quantized models cannot be moved between devices, so check for conflicts
+        if args.pipeline_swap:
+            print("⚠️ Warning: --quantize is incompatible with --pipeline-swap. Disabling pipeline swap.")
+            args.pipeline_swap = False
+
+        print("📦 Using 4-bit quantization...")
+        from transformers import BitsAndBytesConfig as TransformersBitsAndBytesConfig
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
+
+        # Load Visual Transformer (4-bit)
+        print("1/3 - Loading visual transformer...")
+        quantization_config_diffusers = DiffusersBitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        transformer = QwenImageTransformer2DModel.from_pretrained(
+            model_id,
+            subfolder="transformer",
+            quantization_config=quantization_config_diffusers,
+            torch_dtype=torch_dtype,
+        )
+
+        # Load Text Encoder (4-bit)
+        print("2/3 - Loading text encoder...")
+        quantization_config_transformers = TransformersBitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            subfolder="text_encoder",
+            quantization_config=quantization_config_transformers,
+            torch_dtype=torch_dtype,
+        )
+
+        # Create Pipeline
+        print("3/3 - Creating pipeline...")
+        edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
+            model_id,
+            transformer=transformer,
+            text_encoder=text_encoder,
+            torch_dtype=torch_dtype,
+        )
+        # Quantized models are already on CUDA, skip device placement
+        edit_pipeline.set_progress_bar_config(disable=None)
+        print(f"✅ Qwen-Image-Edit-{model_version} pipeline loaded with 4-bit quantization!")
+        if model_version == "2511":
+            print("Features: Reduced image drift, improved consistency, enhanced geometric reasoning")
+        else:
+            print("Features: Enhanced consistency, multi-image support, native ControlNet")
+        return
+
+    # Non-quantized loading
     edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
         model_id,
         torch_dtype=torch_dtype
