@@ -666,12 +666,7 @@
                     
                     <div class="form-group">
                         <label for="generateSteps">Inference Steps</label>
-                        <select id="generateSteps">
-                            <option value="10">10 (Fast)</option>
-                            <option value="20" selected>20 (Default)</option>
-                            <option value="30">30 (Better)</option>
-                            <option value="50">50 (Best)</option>
-                        </select>
+                        <input type="number" id="generateSteps" value="20" min="1" max="100" step="1">
                     </div>
                     
                     <div class="form-group">
@@ -730,12 +725,7 @@
                 <div class="form-row">
                     <div class="form-group">
                         <label for="editSteps">Inference Steps</label>
-                        <select id="editSteps">
-                            <option value="8">8 (Fast - with Lightning LoRA)</option>
-                            <option value="20">20 (Quick)</option>
-                            <option value="30">30 (Better)</option>
-                            <option value="50" selected>50 (Default)</option>
-                        </select>
+                        <input type="number" id="editSteps" value="50" min="1" max="100" step="1">
                     </div>
                     
                     <div class="form-group">
