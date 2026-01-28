@@ -206,15 +206,12 @@ qwen-image-studio/
 - Quantized models are pinned to CUDA and cannot use `--pipeline-swap`
 - Requires `bitsandbytes` package installed
 
-### LoRA Activation Error
-If you get "requires_grad=True on inference tensor" when reactivating a LoRA, this is handled automatically. The server uses `torch.no_grad()` context for LoRA operations.
-
 ### Multi-Image Not Working
 Multi-image editing requires `--edit-model 2509` or `--edit-model 2511`. The original model only supports single images.
 
 ## License
 
-Apache 2.0 - See Qwen-Image model cards for model-specific licensing.
+MIT - See Qwen-Image model cards for model-specific licensing.
 
 ## Acknowledgments
 
