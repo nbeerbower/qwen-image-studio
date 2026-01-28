@@ -25,8 +25,10 @@ app = FastAPI(title="Qwen Image Studio", version="1.0.0")
 parser = argparse.ArgumentParser(description="Qwen Image Studio Server")
 parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
 parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
-parser.add_argument("--edit-model", type=str, default="2509", choices=["original", "2509"], 
-                    help="Which edit model to use: 'original' or '2509' (default: 2509)")
+parser.add_argument("--edit-model", type=str, default="2511", choices=["original", "2509", "2511"],
+                    help="Which edit model to use: 'original', '2509', or '2511' (default: 2511)")
+parser.add_argument("--generation-model", type=str, default="2512", choices=["original", "2512"],
+                    help="Which generation model to use: 'original' or '2512' (default: 2512)")
 parser.add_argument("--quantize", action="store_true",
                     help="Enable 4-bit quantization for edit model (only for original model)")
 parser.add_argument("--cpu-offload", action="store_true", default=True,
@@ -237,25 +239,33 @@ def resize_image_if_needed(image, max_pixels=None):
 def load_generation_pipeline():
     """Load the Qwen-Image generation pipeline"""
     global generation_pipeline, current_pipeline_in_vram
-    
+
     if args.disable_generation:
         print("⚠️ Image generation pipeline disabled")
         return
-        
-    print("🔄 Loading Qwen-Image generation pipeline...")
-    
+
+    # Select model based on argument
+    if args.generation_model == "2512":
+        model_id = "Qwen/Qwen-Image-2512"
+        model_label = "Qwen-Image-2512"
+    else:
+        model_id = "Qwen/Qwen-Image"
+        model_label = "Qwen-Image (original)"
+
+    print(f"🔄 Loading {model_label} generation pipeline...")
+
     device, torch_dtype = get_device()
-    
+
     # If pipeline swapping is enabled, always load to CPU first
     load_device = "cpu" if args.pipeline_swap else device
-    
+
     generation_pipeline = DiffusionPipeline.from_pretrained(
-        "Qwen/Qwen-Image",
+        model_id,
         torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
         use_safetensors=True
     )
-    
+
     # CPU offloading works differently with pipeline swap
     if args.cpu_offload and device == "cuda":
         if args.pipeline_swap:
@@ -266,15 +276,15 @@ def load_generation_pipeline():
             generation_pipeline.enable_model_cpu_offload()
     else:
         generation_pipeline = generation_pipeline.to(load_device)
-    
+
     # If this pipeline should be kept in VRAM, move it now
     if args.pipeline_swap and args.keep_in_vram == "generation" and device == "cuda":
         generation_pipeline.to("cuda")
         if args.cpu_offload:
             generation_pipeline.enable_model_cpu_offload()
         current_pipeline_in_vram = "generation"
-        
-    print(f"✅ Generation pipeline loaded successfully!")
+
+    print(f"✅ {model_label} generation pipeline loaded successfully!")
     if args.pipeline_swap:
         print(f"   Pipeline swap mode enabled - will swap to VRAM on demand")
         if args.keep_in_vram == "generation":
@@ -372,24 +382,24 @@ def load_edit_pipeline_original():
     if args.cpu_offload:
         print(f"   CPU offloading enabled for layer-by-layer processing")
 
-def load_edit_pipeline_2509():
-    """Load the Qwen-Image-Edit-2509 pipeline"""
+def load_edit_pipeline_plus(model_version: str):
+    """Load the Qwen-Image-Edit-2509 or 2511 pipeline (QwenImageEditPlusPipeline)"""
     global edit_pipeline, current_pipeline_in_vram
     from diffusers import QwenImageEditPlusPipeline
-    
-    print("🔄 Loading Qwen-Image-Edit-2509 pipeline...")
-    
-    model_id = "Qwen/Qwen-Image-Edit-2509"
+
+    model_id = f"Qwen/Qwen-Image-Edit-{model_version}"
+    print(f"🔄 Loading Qwen-Image-Edit-{model_version} pipeline...")
+
     device, torch_dtype = get_device()
-    
+
     # If pipeline swapping is enabled, always load to CPU first
     load_device = "cpu" if args.pipeline_swap else device
-    
+
     edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
         model_id,
         torch_dtype=torch_dtype
     )
-    
+
     # Move to device with CPU offload support
     if args.cpu_offload and device == "cuda":
         if args.pipeline_swap:
@@ -405,18 +415,21 @@ def load_edit_pipeline_2509():
                 print("⚠️ CPU offload not supported for QwenImageEditPlusPipeline")
     else:
         edit_pipeline.to(load_device)
-    
+
     # If this pipeline should be kept in VRAM, move it now
     if args.pipeline_swap and args.keep_in_vram == "edit" and device == "cuda":
         edit_pipeline.to("cuda")
         if args.cpu_offload and hasattr(edit_pipeline, 'enable_model_cpu_offload'):
             edit_pipeline.enable_model_cpu_offload()
         current_pipeline_in_vram = "edit"
-    
+
     edit_pipeline.set_progress_bar_config(disable=None)
-    
-    print(f"✅ Qwen-Image-Edit-2509 pipeline loaded successfully!")
-    print("Features: Enhanced consistency, multi-image support, native ControlNet")
+
+    print(f"✅ Qwen-Image-Edit-{model_version} pipeline loaded successfully!")
+    if model_version == "2511":
+        print("Features: Reduced image drift, improved consistency, enhanced geometric reasoning")
+    else:
+        print("Features: Enhanced consistency, multi-image support, native ControlNet")
     if args.pipeline_swap:
         print(f"   Pipeline swap mode enabled - will swap to VRAM on demand")
         if args.keep_in_vram == "edit":
@@ -427,13 +440,13 @@ def load_edit_pipeline_2509():
 def load_edit_pipeline():
     """Load the appropriate edit pipeline based on args"""
     global edit_pipeline
-    
+
     if args.disable_edit:
         print("⚠️ Image editing pipeline disabled")
         return
-        
-    if args.edit_model == "2509":
-        load_edit_pipeline_2509()
+
+    if args.edit_model in ["2509", "2511"]:
+        load_edit_pipeline_plus(args.edit_model)
     else:
         load_edit_pipeline_original()
 
@@ -705,7 +718,8 @@ async def get_system_info():
         "device": device,
         "dtype": str(dtype),
         "cuda_available": torch.cuda.is_available(),
-        "generation_pipeline": "loaded" if generation_pipeline else "disabled",
+        "generation_pipeline": f"loaded ({args.generation_model})" if generation_pipeline else "disabled",
+        "generation_model": args.generation_model,
         "edit_pipeline": f"loaded ({args.edit_model})" if edit_pipeline else "disabled",
         "edit_model": args.edit_model,
         "quantization": args.quantize,

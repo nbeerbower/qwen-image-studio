@@ -6,7 +6,7 @@
       "repo_id": "lightx2v/Qwen-Image-Lightning",
       "weight_name": "Qwen-Image-Lightning-8steps-V1.1.safetensors",
       "pipeline": "edit",
-      "description": "8-step fast inference for original edit model",
+      "description": "8-step fast inference (for --edit-model original only)",
       "recommended_steps": 8
     },
     {
@@ -15,7 +15,7 @@
       "repo_id": "flymy-ai/qwen-image-edit-2509-inscene-lora",
       "weight_name": "pytorch_lora_weights.safetensors",
       "pipeline": "edit",
-      "description": "Scene-coherent editing with better object positioning"
+      "description": "Scene-coherent editing (for --edit-model 2509)"
     }
   ]
 }
