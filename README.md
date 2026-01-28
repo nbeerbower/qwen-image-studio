@@ -124,6 +124,61 @@ The 2509 and 2511 edit models support combining multiple images:
    > "The cat from the first image is sitting next to the dog from the second image in a sunny garden"
 4. Submit and wait for processing
 
+## Multi-GPU Support
+
+Two strategies are available for systems with multiple GPUs:
+
+### Strategy 1: Separate GPUs per Pipeline
+
+Load generation and edit pipelines on different GPUs so both can remain in VRAM:
+
+```bash
+python server.py --generation-device cuda:0 --edit-device cuda:1
+```
+
+| Pros | Cons |
+|------|------|
+| Both pipelines always ready | Requires 2+ GPUs with enough VRAM each |
+| No swapping overhead | Each GPU must fit its full model |
+| Simple to understand | |
+
+**Best for:** Systems with 2+ mid-range GPUs (e.g., 2x RTX 3090)
+
+### Strategy 2: Model Parallelism (device_map)
+
+Distribute a single large model's layers across all available GPUs:
+
+```bash
+python server.py --device-map
+```
+
+| Pros | Cons |
+|------|------|
+| Can fit very large models | Cross-GPU communication overhead |
+| Uses all available VRAM | Higher latency per inference |
+| Automatic layer distribution | More complex debugging |
+
+**Best for:** Running models that don't fit on a single GPU
+
+### Combining Strategies
+
+You can use `--device-map` with only one pipeline enabled:
+
+```bash
+# Distribute edit model across GPUs, disable generation
+python server.py --device-map --disable-generation
+```
+
+### Checking GPU Setup
+
+```python
+import torch
+print(f"GPUs available: {torch.cuda.device_count()}")
+for i in range(torch.cuda.device_count()):
+    print(f"  cuda:{i} - {torch.cuda.get_device_name(i)}")
+    print(f"    Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
+```
+
 ## LoRA System
 
 ### Loading LoRAs
