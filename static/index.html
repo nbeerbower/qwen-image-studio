@@ -168,6 +168,91 @@
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
         }
 
+        .image-previews {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .image-preview-item {
+            position: relative;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .image-preview-item img {
+            width: 100%;
+            height: 150px;
+            object-fit: cover;
+        }
+
+        .image-preview-item .image-number {
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+        }
+
+        .image-preview-item .remove-btn {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 25px;
+            height: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .add-more-btn {
+            margin-top: 15px;
+            padding: 10px 20px;
+            background: #f8f9fa;
+            border: 2px dashed #e1e5e9;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 14px;
+            color: #666;
+            transition: all 0.3s ease;
+        }
+
+        .add-more-btn:hover {
+            border-color: #667eea;
+            color: #667eea;
+        }
+
+        .multi-image-hint {
+            font-weight: normal;
+            font-size: 12px;
+            color: #667eea;
+        }
+
+        .multi-input-images {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .multi-input-images img {
+            width: 80px;
+            height: 80px;
+            object-fit: cover;
+            border-radius: 5px;
+        }
+
         .form-row {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -610,19 +695,26 @@
         <div class="form-section hidden" id="editForm">
             <form id="editFormSubmit">
                 <div class="form-group">
-                    <label for="imageUpload">Upload Image</label>
+                    <label for="imageUpload">
+                        Upload Image(s)
+                        <span id="multiImageHint" class="multi-image-hint" style="display: none;">
+                            - Multiple images supported for combining/compositing
+                        </span>
+                    </label>
                     <div class="file-upload-area" id="uploadArea">
                         <input type="file" id="imageUpload" accept="image/*" class="file-input" required>
                         <div class="upload-icon">📸</div>
                         <div class="upload-text">
                             Click to upload or drag and drop<br>
-                            <small>PNG, JPG, JPEG (Max 10MB)</small>
+                            <small id="uploadHint">PNG, JPG, JPEG (Max 10MB)</small>
                         </div>
                     </div>
-                    <div class="image-preview" id="imagePreview" style="display: none;">
-                        <img id="previewImg" class="preview-image" alt="Preview">
-                        <button type="button" class="remove-image-btn" onclick="removeImage()">✕</button>
+                    <div class="image-previews" id="imagePreviews" style="display: none;">
+                        <!-- Multiple image previews will be added here -->
                     </div>
+                    <button type="button" id="addMoreImagesBtn" class="add-more-btn" style="display: none;" onclick="document.getElementById('imageUpload').click()">
+                        + Add Another Image
+                    </button>
                 </div>
                 
                 <div class="form-group">
@@ -728,19 +820,51 @@
     <script>
         let jobs = {};
         let refreshInterval;
-        let selectedFile = null;
+        let selectedFiles = [];  // Support multiple files
         let currentMode = 'generate';
         let currentFilter = 'all';
         let loadedLoras = [];
+        let serverInfo = {};
+        let supportsMultiImage = false;
+
+        // Fetch server info to check capabilities
+        async function fetchServerInfo() {
+            try {
+                const response = await fetch('/system/info');
+                serverInfo = await response.json();
+                // Multi-image supported for 2509 and 2511 edit models
+                supportsMultiImage = ['2509', '2511'].includes(serverInfo.edit_model);
+                updateMultiImageUI();
+            } catch (error) {
+                console.error('Error fetching server info:', error);
+            }
+        }
+
+        function updateMultiImageUI() {
+            const hint = document.getElementById('multiImageHint');
+            const uploadHint = document.getElementById('uploadHint');
+            const fileInput = document.getElementById('imageUpload');
+            const addMoreBtn = document.getElementById('addMoreImagesBtn');
+
+            if (supportsMultiImage) {
+                hint.style.display = 'inline';
+                uploadHint.textContent = 'PNG, JPG, JPEG (Max 10MB each) - Multiple images supported';
+                fileInput.multiple = true;
+            } else {
+                hint.style.display = 'none';
+                uploadHint.textContent = 'PNG, JPG, JPEG (Max 10MB)';
+                fileInput.multiple = false;
+            }
+        }
 
         // Mode switching
         function switchMode(mode) {
             currentMode = mode;
-            
+
             // Update buttons
             document.getElementById('generateModeBtn').classList.toggle('active', mode === 'generate');
             document.getElementById('editModeBtn').classList.toggle('active', mode === 'edit');
-            
+
             // Show/hide forms
             document.getElementById('generateForm').classList.toggle('hidden', mode !== 'generate');
             document.getElementById('editForm').classList.toggle('hidden', mode !== 'edit');
@@ -1044,11 +1168,11 @@
             }).join('');
         }
 
-        // File upload handling for edit mode
+        // File upload handling for edit mode (supports multiple images)
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('imageUpload');
-        const imagePreview = document.getElementById('imagePreview');
-        const previewImg = document.getElementById('previewImg');
+        const imagePreviews = document.getElementById('imagePreviews');
+        const addMoreBtn = document.getElementById('addMoreImagesBtn');
 
         uploadArea?.addEventListener('click', () => fileInput.click());
 
@@ -1064,46 +1188,76 @@
         uploadArea?.addEventListener('drop', (e) => {
             e.preventDefault();
             uploadArea.classList.remove('drag-over');
-            
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                handleFileSelect(files[0]);
-            }
+
+            const files = Array.from(e.dataTransfer.files);
+            handleFilesSelect(files);
         });
 
         fileInput?.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
-                handleFileSelect(e.target.files[0]);
+                const files = Array.from(e.target.files);
+                handleFilesSelect(files);
             }
         });
 
-        function handleFileSelect(file) {
-            if (!file.type.startsWith('image/')) {
-                alert('Please select an image file');
-                return;
+        function handleFilesSelect(files) {
+            for (const file of files) {
+                if (!file.type.startsWith('image/')) {
+                    alert(`${file.name} is not an image file`);
+                    continue;
+                }
+
+                if (file.size > 10 * 1024 * 1024) {
+                    alert(`${file.name} exceeds 10MB limit`);
+                    continue;
+                }
+
+                // For single-image mode, replace; for multi-image mode, add
+                if (!supportsMultiImage) {
+                    selectedFiles = [file];
+                } else {
+                    selectedFiles.push(file);
+                }
             }
-            
-            if (file.size > 10 * 1024 * 1024) {
-                alert('File size must be less than 10MB');
-                return;
-            }
-            
-            selectedFile = file;
-            
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                previewImg.src = e.target.result;
-                uploadArea.style.display = 'none';
-                imagePreview.style.display = 'block';
-            };
-            reader.readAsDataURL(file);
+
+            updateImagePreviews();
         }
 
-        function removeImage() {
-            selectedFile = null;
+        function updateImagePreviews() {
+            if (selectedFiles.length === 0) {
+                imagePreviews.style.display = 'none';
+                uploadArea.style.display = 'block';
+                if (addMoreBtn) addMoreBtn.style.display = 'none';
+                return;
+            }
+
+            uploadArea.style.display = 'none';
+            imagePreviews.style.display = 'grid';
+            if (addMoreBtn && supportsMultiImage) addMoreBtn.style.display = 'block';
+
+            imagePreviews.innerHTML = selectedFiles.map((file, index) => {
+                const url = URL.createObjectURL(file);
+                return `
+                    <div class="image-preview-item">
+                        <span class="image-number">#${index + 1}</span>
+                        <img src="${url}" alt="Preview ${index + 1}">
+                        <button type="button" class="remove-btn" onclick="removeImageAt(${index})">✕</button>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function removeImageAt(index) {
+            selectedFiles.splice(index, 1);
+            updateImagePreviews();
+            // Reset file input
             fileInput.value = '';
-            uploadArea.style.display = 'block';
-            imagePreview.style.display = 'none';
+        }
+
+        function removeAllImages() {
+            selectedFiles = [];
+            fileInput.value = '';
+            updateImagePreviews();
         }
 
         // Generation form submission
@@ -1153,22 +1307,25 @@
             }
         });
 
-        // Edit form submission
+        // Edit form submission (supports multiple images)
         document.getElementById('editFormSubmit').addEventListener('submit', async (e) => {
             e.preventDefault();
-            
-            if (!selectedFile) {
-                alert('Please select an image to edit');
+
+            if (selectedFiles.length === 0) {
+                alert('Please select at least one image to edit');
                 return;
             }
-            
+
             const formData = new FormData();
-            formData.append('image', selectedFile);
+            // Append all selected images
+            for (const file of selectedFiles) {
+                formData.append('images', file);
+            }
             formData.append('prompt', document.getElementById('editPrompt').value);
             formData.append('negative_prompt', document.getElementById('editNegativePrompt').value || ' ');
             formData.append('num_inference_steps', document.getElementById('editSteps').value);
             formData.append('cfg_scale', document.getElementById('editCfgScale').value);
-            
+
             const seedValue = document.getElementById('editSeed').value;
             if (seedValue) {
                 formData.append('seed', seedValue);
@@ -1181,7 +1338,7 @@
                 });
 
                 const result = await response.json();
-                
+
                 if (response.ok) {
                     jobs[result.job_id] = {
                         job_id: result.job_id,
@@ -1190,13 +1347,13 @@
                         created_at: new Date().toISOString(),
                         prompt: document.getElementById('editPrompt').value
                     };
-                    
+
                     document.getElementById('editPrompt').value = '';
                     document.getElementById('editNegativePrompt').value = '';
-                    removeImage();
-                    
+                    removeAllImages();
+
                     refreshJobs();
-                    alert(`Edit job submitted! ID: ${result.job_id}`);
+                    alert(`Edit job submitted with ${selectedFiles.length} image(s)! ID: ${result.job_id}`);
                 } else {
                     alert(`Error: ${result.detail}`);
                 }
@@ -1276,14 +1433,23 @@
                         </div>
                     ` : ''}
                     
-                    ${job.job_type === 'edit' && (job.input_image_url || job.output_image_url) ? `
+                    ${job.job_type === 'edit' && (job.input_image_url || job.input_image_urls || job.output_image_url) ? `
                         <div class="image-comparison">
-                            ${job.input_image_url ? `
+                            ${(job.input_image_urls && job.input_image_urls.length > 1) ? `
+                                <div>
+                                    <div class="image-label">Inputs (${job.input_image_urls.length})</div>
+                                    <div class="multi-input-images">
+                                        ${job.input_image_urls.map((url, i) => `
+                                            <img src="${url}" alt="Input ${i+1}" title="Input ${i+1}">
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : (job.input_image_url ? `
                                 <div>
                                     <div class="image-label">Original</div>
                                     <img src="${job.input_image_url}" alt="Original image" class="comparison-image">
                                 </div>
-                            ` : ''}
+                            ` : '')}
                             ${job.output_image_url ? `
                                 <div>
                                     <div class="image-label">Edited</div>
@@ -1314,6 +1480,7 @@
         }
 
         // Initialize
+        fetchServerInfo();  // Check multi-image support
         refreshJobs();
         startAutoRefresh();
 

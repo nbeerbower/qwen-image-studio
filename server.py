@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, F
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any, Literal, List
 from enum import Enum
 import asyncio
 import uuid
@@ -92,7 +92,8 @@ class JobStatus(BaseModel):
     job_type: JobType
     status: str  # "queued", "processing", "completed", "failed"
     progress: Optional[float] = None
-    input_image_url: Optional[str] = None
+    input_image_url: Optional[str] = None  # Deprecated, use input_image_urls
+    input_image_urls: Optional[List[str]] = None  # Support multiple input images
     output_image_url: Optional[str] = None
     error: Optional[str] = None
     created_at: str
@@ -497,17 +498,24 @@ def process_job_queue():
                 ).images[0]
                 
             else:  # Edit job
-                input_image_path = job_data["input_image_path"]
-                
-                # Load and resize input image
-                image = Image.open(input_image_path).convert("RGB")
-                image = resize_image_if_needed(image)
+                input_image_paths = job_data.get("input_image_paths", [job_data.get("input_image_path")])
+
+                # Load and resize input images
+                input_images = []
+                for path in input_image_paths:
+                    img = Image.open(path).convert("RGB")
+                    img = resize_image_if_needed(img)
+                    input_images.append(img)
+
                 job_status[job_id].progress = 0.2
-                
+
                 # Prepare inputs based on pipeline type
-                if args.edit_model == "2509":
+                if args.edit_model in ["2509", "2511"]:
+                    # QwenImageEditPlusPipeline supports multiple images
+                    # Pass single image or list depending on count
+                    image_input = input_images if len(input_images) > 1 else input_images[0]
                     inputs = {
-                        "image": image,
+                        "image": image_input,
                         "prompt": request.prompt,
                         "negative_prompt": request.negative_prompt,
                         "num_inference_steps": request.num_inference_steps,
@@ -517,17 +525,18 @@ def process_job_queue():
                         "num_images_per_prompt": 1
                     }
                 else:
+                    # Original pipeline only supports single image
                     inputs = {
-                        "image": image,
+                        "image": input_images[0],
                         "prompt": request.prompt,
                         "negative_prompt": request.negative_prompt,
                         "num_inference_steps": request.num_inference_steps,
                         "true_cfg_scale": request.cfg_scale,
                         "generator": generator
                     }
-                
+
                 job_status[job_id].progress = 0.3
-                
+
                 # Generate edited image
                 with torch.inference_mode():
                     output = edit_pipeline(**inputs)
@@ -619,27 +628,41 @@ async def generate_image(request: GenerationRequest):
 
 @app.post("/edit", response_model=JobResponse)
 async def edit_image(
-    image: UploadFile = File(...),
+    images: List[UploadFile] = File(...),
     prompt: str = Form(...),
     negative_prompt: str = Form(" "),
     num_inference_steps: int = Form(50),
     cfg_scale: float = Form(4.0),
     seed: Optional[int] = Form(None)
 ):
-    """Submit a new image edit request"""
+    """Submit a new image edit request (supports multiple images for 2509/2511 models)"""
     if edit_pipeline is None:
         raise HTTPException(status_code=503, detail="Edit pipeline is disabled")
-        
+
+    # Check if multi-image is supported
+    supports_multi_image = args.edit_model in ["2509", "2511"]
+    if len(images) > 1 and not supports_multi_image:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Multiple images only supported with edit models 2509/2511. Current model: {args.edit_model}"
+        )
+
     job_id = str(uuid.uuid4())
-    
-    # Save uploaded image
-    input_filename = f"{job_id}_input.png"
-    input_path = os.path.join("uploaded_images", input_filename)
-    
-    contents = await image.read()
-    img = Image.open(io.BytesIO(contents)).convert("RGB")
-    img.save(input_path)
-    
+
+    # Save uploaded images
+    input_paths = []
+    input_urls = []
+    for i, image in enumerate(images):
+        input_filename = f"{job_id}_input_{i}.png"
+        input_path = os.path.join("uploaded_images", input_filename)
+
+        contents = await image.read()
+        img = Image.open(io.BytesIO(contents)).convert("RGB")
+        img.save(input_path)
+
+        input_paths.append(input_path)
+        input_urls.append(f"/uploads/{input_filename}")
+
     # Create request object
     request = EditRequest(
         prompt=prompt,
@@ -648,7 +671,7 @@ async def edit_image(
         cfg_scale=cfg_scale,
         seed=seed
     )
-    
+
     # Create job status
     job_status[job_id] = JobStatus(
         job_id=job_id,
@@ -658,21 +681,22 @@ async def edit_image(
         prompt=prompt,
         num_inference_steps=num_inference_steps,
         cfg_scale=cfg_scale,
-        input_image_url=f"/uploads/{input_filename}"
+        input_image_url=input_urls[0],  # Backwards compatibility
+        input_image_urls=input_urls
     )
-    
+
     # Add to queue
     job_queue.put({
         "job_id": job_id,
         "job_type": JobType.EDIT,
         "request": request,
-        "input_image_path": input_path
+        "input_image_paths": input_paths  # Now a list
     })
-    
+
     return JobResponse(
         job_id=job_id,
         status="queued",
-        message=f"Edit job submitted. Queue position: {job_queue.qsize()}"
+        message=f"Edit job submitted with {len(images)} image(s). Queue position: {job_queue.qsize()}"
     )
 
 @app.get("/status/{job_id}", response_model=JobStatus)
