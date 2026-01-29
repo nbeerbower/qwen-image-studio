@@ -1,6 +1,7 @@
 # Generated and uploaded images
 generated_images/
 uploaded_images/
+loras/
 
 # Python
 __pycache__/
