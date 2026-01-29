@@ -114,6 +114,18 @@ python server.py --edit-model original
 python server.py --device cpu --disable-generation
 ```
 
+### Load Custom Model Checkpoint
+```bash
+# From a single .safetensors file (ComfyUI format)
+python server.py --edit-model /path/to/model.safetensors
+
+# From a local diffusers-format directory
+python server.py --edit-model /path/to/model-directory/
+
+# Specify pipeline type for custom models
+python server.py --edit-model /path/to/model.safetensors --edit-model-type plus
+```
+
 ## Multi-Image Editing
 
 The 2509 and 2511 edit models support combining multiple images:
@@ -177,6 +189,43 @@ print(f"GPUs available: {torch.cuda.device_count()}")
 for i in range(torch.cuda.device_count()):
     print(f"  cuda:{i} - {torch.cuda.get_device_name(i)}")
     print(f"    Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
+```
+
+## Custom Models
+
+You can load custom edit models from local files instead of HuggingFace:
+
+### Single-File Checkpoints (ComfyUI Format)
+
+Load `.safetensors` files that contain all model weights in one file:
+
+```bash
+python server.py --edit-model /path/to/Qwen-Edit-Custom.safetensors
+```
+
+The loader expects ComfyUI-style key prefixes:
+- `model.diffusion_model.*` → transformer
+- `text_encoders.*` → text encoder
+- `vae.*` → VAE
+
+### Local Diffusers Format
+
+Load from a directory containing the standard diffusers model structure:
+
+```bash
+python server.py --edit-model /path/to/model-directory/
+```
+
+### Pipeline Type
+
+For custom models, specify the pipeline architecture if auto-detection fails:
+
+```bash
+# Use QwenImageEditPlusPipeline (for 2509/2511-style models)
+python server.py --edit-model /path/to/model.safetensors --edit-model-type plus
+
+# Use QwenImageEditPipeline (for original-style models)
+python server.py --edit-model /path/to/model.safetensors --edit-model-type original
 ```
 
 ## LoRA System

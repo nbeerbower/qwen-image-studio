@@ -25,8 +25,10 @@ app = FastAPI(title="Qwen Image Studio", version="1.0.0")
 parser = argparse.ArgumentParser(description="Qwen Image Studio Server")
 parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
 parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
-parser.add_argument("--edit-model", type=str, default="2511", choices=["original", "2509", "2511"],
-                    help="Which edit model to use: 'original', '2509', or '2511' (default: 2511)")
+parser.add_argument("--edit-model", type=str, default="2511",
+                    help="Edit model: 'original', '2509', '2511', or path to local model/checkpoint")
+parser.add_argument("--edit-model-type", type=str, default=None, choices=["original", "plus"],
+                    help="Pipeline type for local models: 'original' or 'plus' (auto-detected if not set)")
 parser.add_argument("--generation-model", type=str, default="2512", choices=["original", "2512"],
                     help="Which generation model to use: 'original' or '2512' (default: 2512)")
 parser.add_argument("--quantize", action="store_true",
@@ -650,6 +652,161 @@ def load_edit_pipeline_plus(model_version: str):
     if args.cpu_offload:
         print(f"   CPU offloading enabled (if supported)")
 
+def load_edit_pipeline_from_single_file(checkpoint_path: str):
+    """Load edit pipeline from a single .safetensors checkpoint (ComfyUI format)"""
+    global edit_pipeline, current_pipeline_in_vram
+    from safetensors import safe_open
+    from diffusers import QwenImageEditPlusPipeline, QwenImageTransformer2DModel, AutoencoderKL
+    from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+
+    print(f"🔄 Loading edit pipeline from single file: {checkpoint_path}")
+
+    device, torch_dtype = get_edit_device()
+    if args.edit_device:
+        print(f"   Using device: {device}")
+
+    is_cuda = device.startswith("cuda")
+
+    # Determine pipeline type
+    pipeline_type = args.edit_model_type or "plus"
+    print(f"   Pipeline type: {pipeline_type}")
+
+    # Load the checkpoint
+    print("1/4 - Loading checkpoint...")
+    state_dict = {}
+    with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            state_dict[key] = f.get_tensor(key)
+
+    # Separate components
+    print("2/4 - Separating components...")
+    transformer_state = {}
+    text_encoder_state = {}
+    vae_state = {}
+
+    for key, tensor in state_dict.items():
+        if key.startswith("model.diffusion_model."):
+            # Remove prefix for transformer
+            new_key = key.replace("model.diffusion_model.", "")
+            transformer_state[new_key] = tensor
+        elif key.startswith("text_encoders."):
+            # Remove prefix for text encoder (handle qwen25_7b or other variants)
+            parts = key.split(".", 2)
+            if len(parts) >= 3:
+                new_key = parts[2]  # Skip "text_encoders.qwen25_7b."
+                text_encoder_state[new_key] = tensor
+        elif key.startswith("vae."):
+            new_key = key.replace("vae.", "")
+            vae_state[new_key] = tensor
+
+    print(f"   Transformer keys: {len(transformer_state)}")
+    print(f"   Text encoder keys: {len(text_encoder_state)}")
+    print(f"   VAE keys: {len(vae_state)}")
+
+    # Load base pipeline for config, then replace weights
+    print("3/4 - Loading base pipeline structure...")
+    base_model = "Qwen/Qwen-Image-Edit-2511"  # Use 2511 as base for structure
+
+    if args.device_map and get_gpu_count() > 1:
+        print(f"📊 Using device_map='auto' for multi-GPU")
+        edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
+            base_model,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+        )
+    else:
+        edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
+            base_model,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+        )
+
+    # Load custom weights
+    print("4/4 - Loading custom weights...")
+
+    # Load transformer weights
+    missing, unexpected = edit_pipeline.transformer.load_state_dict(transformer_state, strict=False)
+    if missing:
+        print(f"   Transformer - missing keys: {len(missing)}")
+    if unexpected:
+        print(f"   Transformer - unexpected keys: {len(unexpected)}")
+
+    # Load text encoder weights if present
+    if text_encoder_state:
+        missing, unexpected = edit_pipeline.text_encoder.load_state_dict(text_encoder_state, strict=False)
+        if missing:
+            print(f"   Text encoder - missing keys: {len(missing)}")
+        if unexpected:
+            print(f"   Text encoder - unexpected keys: {len(unexpected)}")
+
+    # Load VAE weights if present
+    if vae_state:
+        missing, unexpected = edit_pipeline.vae.load_state_dict(vae_state, strict=False)
+        if missing:
+            print(f"   VAE - missing keys: {len(missing)}")
+        if unexpected:
+            print(f"   VAE - unexpected keys: {len(unexpected)}")
+
+    # Move to device if not using device_map
+    if not (args.device_map and get_gpu_count() > 1):
+        if args.cpu_offload and is_cuda:
+            if hasattr(edit_pipeline, 'enable_model_cpu_offload'):
+                edit_pipeline.enable_model_cpu_offload()
+            else:
+                edit_pipeline.to(device)
+        else:
+            edit_pipeline.to(device)
+
+    edit_pipeline.set_progress_bar_config(disable=None)
+
+    # Clear memory
+    del state_dict, transformer_state, text_encoder_state, vae_state
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print(f"✅ Custom edit pipeline loaded from {os.path.basename(checkpoint_path)}")
+
+def load_edit_pipeline_from_local(model_path: str):
+    """Load edit pipeline from a local directory (diffusers format)"""
+    global edit_pipeline, current_pipeline_in_vram
+    from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
+
+    print(f"🔄 Loading edit pipeline from local path: {model_path}")
+
+    device, torch_dtype = get_edit_device()
+    is_cuda = device.startswith("cuda")
+
+    # Determine pipeline type
+    pipeline_type = args.edit_model_type or "plus"
+    PipelineClass = QwenImageEditPlusPipeline if pipeline_type == "plus" else QwenImageEditPipeline
+
+    print(f"   Pipeline type: {pipeline_type}")
+
+    if args.device_map and get_gpu_count() > 1:
+        print(f"📊 Using device_map='auto' for multi-GPU")
+        edit_pipeline = PipelineClass.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+        )
+    else:
+        edit_pipeline = PipelineClass.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+        )
+
+        if args.cpu_offload and is_cuda:
+            if hasattr(edit_pipeline, 'enable_model_cpu_offload'):
+                edit_pipeline.enable_model_cpu_offload()
+            else:
+                edit_pipeline.to(device)
+        else:
+            edit_pipeline.to(device)
+
+    edit_pipeline.set_progress_bar_config(disable=None)
+    print(f"✅ Edit pipeline loaded from {model_path}")
+
 def load_edit_pipeline():
     """Load the appropriate edit pipeline based on args"""
     global edit_pipeline
@@ -658,10 +815,25 @@ def load_edit_pipeline():
         print("⚠️ Image editing pipeline disabled")
         return
 
-    if args.edit_model in ["2509", "2511"]:
+    # Check if edit_model is a path
+    if os.path.exists(args.edit_model):
+        if args.edit_model.endswith('.safetensors'):
+            # Single file checkpoint
+            load_edit_pipeline_from_single_file(args.edit_model)
+        elif os.path.isdir(args.edit_model):
+            # Local directory in diffusers format
+            load_edit_pipeline_from_local(args.edit_model)
+        else:
+            print(f"⚠️ Unknown model format: {args.edit_model}")
+            return
+    elif args.edit_model in ["2509", "2511"]:
         load_edit_pipeline_plus(args.edit_model)
-    else:
+    elif args.edit_model == "original":
         load_edit_pipeline_original()
+    else:
+        # Try as HuggingFace model ID
+        print(f"🔄 Loading edit model from HuggingFace: {args.edit_model}")
+        load_edit_pipeline_from_local(args.edit_model)
 
 def process_job_queue():
     """Background worker to process both generation and edit requests"""
