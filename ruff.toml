@@ -1,0 +1,41 @@
+# Ruff configuration for Qwen Image Studio
+
+# Set the maximum line length
+line-length = 120
+
+# Target Python version
+target-version = "py310"
+
+[lint]
+# Enable additional linting rules
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+]
+
+# Ignore specific rules
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # function call in default argument
+]
+
+# Exclude directories
+exclude = [
+    ".git",
+    ".github",
+    "__pycache__",
+    "*.pyc",
+    ".pytest_cache",
+    "venv",
+    ".venv",
+]
+
+[format]
+# Use double quotes
+quote-style = "double"
+
+# Indent with spaces
+indent-style = "space"
