@@ -301,11 +301,11 @@ def load_generation_pipeline():
 
     # Device map for multi-GPU model parallelism
     if args.device_map and get_gpu_count() > 1:
-        print(f"📊 Using device_map='auto' to distribute across {get_gpu_count()} GPUs")
+        print(f"📊 Using device_map='balanced' to distribute across {get_gpu_count()} GPUs")
         generation_pipeline = DiffusionPipeline.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
-            device_map="auto",
+            device_map="balanced",
             low_cpu_mem_usage=True,
             use_safetensors=True
         )
@@ -336,6 +336,7 @@ def load_generation_pipeline():
             subfolder="transformer",
             quantization_config=quantization_config_diffusers,
             torch_dtype=torch_dtype,
+            device_map={"": device},
         )
 
         # Load Text Encoder (4-bit)
@@ -351,6 +352,7 @@ def load_generation_pipeline():
             subfolder="text_encoder",
             quantization_config=quantization_config_transformers,
             torch_dtype=torch_dtype,
+            device_map={"": device},
         )
 
         # Create Pipeline
@@ -363,7 +365,9 @@ def load_generation_pipeline():
             low_cpu_mem_usage=True,
             use_safetensors=True,
         )
-        print(f"✅ {model_label} generation pipeline loaded with 4-bit quantization!")
+        # Move VAE to the same device (it's not quantized)
+        generation_pipeline.vae.to(device)
+        print(f"✅ {model_label} generation pipeline loaded with 4-bit quantization on {device}!")
         return
 
     # Non-quantized loading
@@ -421,11 +425,11 @@ def load_edit_pipeline_original():
 
     # Device map for multi-GPU model parallelism
     if args.device_map and get_gpu_count() > 1:
-        print(f"📊 Using device_map='auto' to distribute across {get_gpu_count()} GPUs")
+        print(f"📊 Using device_map='balanced' to distribute across {get_gpu_count()} GPUs")
         edit_pipeline = QwenImageEditPipeline.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
-            device_map="auto",
+            device_map="balanced",
         )
         edit_pipeline.set_progress_bar_config(disable=None)
         print("✅ Original edit pipeline loaded with multi-GPU distribution!")
@@ -455,6 +459,7 @@ def load_edit_pipeline_original():
             subfolder="transformer",
             quantization_config=quantization_config_diffusers,
             torch_dtype=torch_dtype,
+            device_map={"": device},
         )
 
         # Load Text Encoder (4-bit)
@@ -470,6 +475,7 @@ def load_edit_pipeline_original():
             subfolder="text_encoder",
             quantization_config=quantization_config_transformers,
             torch_dtype=torch_dtype,
+            device_map={"": device},
         )
 
         # Create Pipeline
@@ -480,8 +486,9 @@ def load_edit_pipeline_original():
             text_encoder=text_encoder,
             torch_dtype=torch_dtype,
         )
-        # Quantized models are already on CUDA, skip device placement below
-        print("✅ Original edit pipeline loaded with 4-bit quantization!")
+        # Move VAE to the same device (it's not quantized)
+        edit_pipeline.vae.to(device)
+        print(f"✅ Original edit pipeline loaded with 4-bit quantization on {device}!")
         edit_pipeline.set_progress_bar_config(disable=None)
         return
     else:
@@ -537,11 +544,11 @@ def load_edit_pipeline_plus(model_version: str):
 
     # Device map for multi-GPU model parallelism
     if args.device_map and get_gpu_count() > 1:
-        print(f"📊 Using device_map='auto' to distribute across {get_gpu_count()} GPUs")
+        print(f"📊 Using device_map='balanced' to distribute across {get_gpu_count()} GPUs")
         edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
-            device_map="auto",
+            device_map="balanced",
         )
         edit_pipeline.set_progress_bar_config(disable=None)
         print(f"✅ Qwen-Image-Edit-{model_version} pipeline loaded with multi-GPU distribution!")
@@ -575,6 +582,7 @@ def load_edit_pipeline_plus(model_version: str):
             subfolder="transformer",
             quantization_config=quantization_config_diffusers,
             torch_dtype=torch_dtype,
+            device_map={"": device},
         )
 
         # Load Text Encoder (4-bit)
@@ -590,6 +598,7 @@ def load_edit_pipeline_plus(model_version: str):
             subfolder="text_encoder",
             quantization_config=quantization_config_transformers,
             torch_dtype=torch_dtype,
+            device_map={"": device},
         )
 
         # Create Pipeline
@@ -600,9 +609,10 @@ def load_edit_pipeline_plus(model_version: str):
             text_encoder=text_encoder,
             torch_dtype=torch_dtype,
         )
-        # Quantized models are already on CUDA, skip device placement
+        # Move VAE to the same device (it's not quantized)
+        edit_pipeline.vae.to(device)
         edit_pipeline.set_progress_bar_config(disable=None)
-        print(f"✅ Qwen-Image-Edit-{model_version} pipeline loaded with 4-bit quantization!")
+        print(f"✅ Qwen-Image-Edit-{model_version} pipeline loaded with 4-bit quantization on {device}!")
         if model_version == "2511":
             print("Features: Reduced image drift, improved consistency, enhanced geometric reasoning")
         else:
@@ -708,11 +718,11 @@ def load_edit_pipeline_from_single_file(checkpoint_path: str):
     base_model = "Qwen/Qwen-Image-Edit-2511"  # Use 2511 as base for structure
 
     if args.device_map and get_gpu_count() > 1:
-        print(f"📊 Using device_map='auto' for multi-GPU")
+        print(f"📊 Using device_map='balanced' for multi-GPU")
         edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
             base_model,
             torch_dtype=torch_dtype,
-            device_map="auto",
+            device_map="balanced",
         )
     else:
         edit_pipeline = QwenImageEditPlusPipeline.from_pretrained(
@@ -783,11 +793,11 @@ def load_edit_pipeline_from_local(model_path: str):
     print(f"   Pipeline type: {pipeline_type}")
 
     if args.device_map and get_gpu_count() > 1:
-        print(f"📊 Using device_map='auto' for multi-GPU")
+        print(f"📊 Using device_map='balanced' for multi-GPU")
         edit_pipeline = PipelineClass.from_pretrained(
             model_path,
             torch_dtype=torch_dtype,
-            device_map="auto",
+            device_map="balanced",
         )
     else:
         edit_pipeline = PipelineClass.from_pretrained(
