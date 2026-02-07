@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, Literal, List
 from enum import Enum
 import asyncio
+import gc
 import uuid
 import os
 import time
@@ -240,9 +241,13 @@ def swap_pipeline_to_device(pipeline_name: str):
             if args.cpu_offload:
                 print(f"   Enabling CPU offload for {pipeline_name} pipeline...")
                 target_pipeline.enable_model_cpu_offload()
-            
+
+            # Re-enable VAE tiling after device move
+            if hasattr(target_pipeline, 'vae') and hasattr(target_pipeline.vae, 'enable_tiling'):
+                target_pipeline.vae.enable_tiling()
+
             current_pipeline_in_vram = pipeline_name
-        
+
         torch.cuda.empty_cache()
         print(f"✅ Pipeline swap complete")
 
@@ -877,10 +882,15 @@ def process_job_queue():
             else:
                 generator = torch.Generator(device=device if device == "cuda" else "cpu").manual_seed(request.seed)
             
+            # Free any stale tensors before pipeline run to maximize VRAM for VAE
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             if job_type == JobType.GENERATE:
                 # Generation job
                 job_status[job_id].progress = 0.3
-                
+
                 image = generation_pipeline(
                     prompt=request.prompt,
                     negative_prompt=request.negative_prompt,
@@ -985,6 +995,15 @@ async def startup_event():
     """Load pipelines when server starts"""
     load_generation_pipeline()
     load_edit_pipeline()
+
+    # Enable VAE tiling on all loaded pipelines to prevent OOM during decode.
+    # VAE decode happens after diffusion completes (at ~100% progress) and can
+    # spike memory when decoding the full image at once. Tiling decodes in
+    # smaller tiles, dramatically reducing peak VRAM usage.
+    for name, pipe in [("generation", generation_pipeline), ("edit", edit_pipeline)]:
+        if pipe is not None and hasattr(pipe, 'vae') and hasattr(pipe.vae, 'enable_tiling'):
+            pipe.vae.enable_tiling()
+            print(f"   VAE tiling enabled for {name} pipeline")
 
 @app.post("/generate", response_model=JobResponse)
 async def generate_image(request: GenerationRequest):
