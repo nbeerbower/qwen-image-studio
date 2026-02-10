@@ -1,7 +1,7 @@
 # Core dependencies
 torch>=2.0.0
 torchvision>=0.15.0
-transformers>=4.46.0  # Updated - needed for HybridCache
+transformers>=4.57.1  # Qwen-Image-2512 model config requires text_config support
 accelerate>=0.24.0
 safetensors>=0.4.0
 
